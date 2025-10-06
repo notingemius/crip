@@ -1,48 +1,45 @@
-import os, time
-import ccxt
-from ccxt.base.errors import InvalidNonce
+# mexc_contract_ping.py
+import socket, ssl, time, requests
 
-KEY = os.getenv("MEXC_KEY", "")
-SEC = os.getenv("MEXC_SECRET", "")
-SYMBOL = os.getenv("SYMBOL", "BAGWORK/USDT:USDT")  # можно переопределять в Render
+HOST = "contract.mexc.com"
+PORT = 443
+GET_URL  = "https://contract.mexc.com/api/v1/contract/detail"
+POST_URL = "https://contract.mexc.com/api/v1/private/order/submit"  # ожидаем 401/Signature error, но не timeout
 
-def mexc_swap():
-    return ccxt.mexc({
-        "apiKey": KEY, "secret": SEC,
-        "enableRateLimit": True, "timeout": 20000,
-        "options": {"defaultType": "swap", "adjustForTimeDifference": True},
-    })
-
-def main():
-    if not KEY or not SEC:
-        raise SystemExit("Нет MEXC_KEY/MEXC_SECRET")
-
-    ex = mexc_swap()
-    print("load_markets() ..."); ex.load_markets()
+def step(name, fn):
+    print(f"\n-- {name} --")
     try:
-        diff = ex.load_time_difference()
-        print("time diff:", diff, "ms")
+        t0 = time.time()
+        out = fn()
+        dt = (time.time()-t0)*1000
+        print(f"OK ({dt:.0f} ms) :: {out}")
     except Exception as e:
-        print("time diff warn:", e)
+        print("FAIL ::", repr(e))
 
-    if SYMBOL not in ex.markets:
-        raise SystemExit(f"Маркет не найден: {SYMBOL}")
+def dns():
+    return socket.getaddrinfo(HOST, PORT)
 
-    print("fetch_balance(swap) ...")
-    bal = ex.fetch_balance(params={"type":"swap","recvWindow":60000})
-    print("USDT swap total:", bal.get("total",{}).get("USDT"))
+def tcp_tls():
+    ctx = ssl.create_default_context()
+    s = socket.create_connection((HOST, PORT), timeout=8)
+    tls = ctx.wrap_socket(s, server_hostname=HOST)
+    tls.settimeout(8)
+    tls.do_handshake()
+    tls.close()
+    return "TLS handshake ok"
 
-    # Просто проверяем доступность POST через приватный эндпоинт без реальной сделки:
-    # fetch_open_orders использует приватный POST/GET у фьючерсов
-    try:
-        oo = ex.fetch_open_orders(SYMBOL, params={"recvWindow":60000})
-        print("open orders:", len(oo))
-    except InvalidNonce as e:
-        print("InvalidNonce:", e)
-    except Exception as e:
-        print("Private POST error:", repr(e))
+def http_get():
+    r = requests.get(GET_URL, timeout=8)
+    return f"GET {r.status_code} len={len(r.content)}"
 
-    ex.close()
+def http_post():
+    # без подписи → ждём быстрый 4xx. если тут timeout — блокировка POST
+    r = requests.post(POST_URL, timeout=8, data={})
+    return f"POST {r.status_code} len={len(r.content)}"
 
 if __name__ == "__main__":
-    main()
+    step("DNS", dns)
+    step("TCP+TLS", tcp_tls)
+    step("HTTP GET", http_get)
+    step("HTTP POST (без подписи)", http_post)
+    print("\nЕсли GET=OK, а POST=timeout → блокирует антивирус/фаервол/провайдер POST на contract.mexc.com.")
